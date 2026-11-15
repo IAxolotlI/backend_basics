@@ -1,57 +1,30 @@
-from datetime import datetime
+from decimal import Decimal
 
-from .exceptions import OrderAlreadyCompletedError, OrderNotFoundError
-from .repository import OrderRepository
-from .schemas import OrderCreate, OrderStatus, OrderUpdate
+from sqlalchemy.orm import Session
+
+from .repositories import OrderRepository, UserRepository
 
 
-class OrderService:
-    def __init__(self, repository: OrderRepository) -> None:
-        self._repository = repository
+def create_order(session: Session, user_id: int, amount: Decimal):
+    if amount <= 0:
+        raise ValueError("Сумма заказа должна быть положительной")
 
-    def list_orders(
-        self,
-        status_filter: OrderStatus | None = None,
-        limit: int = 10,
-        offset: int = 0,
-    ) -> list[dict]:
-        orders = self._repository.get_all()
-        if status_filter is not None:
-            orders = [o for o in orders if o["status"] == status_filter]
-        return orders[offset : offset + limit]
+    user_repo = UserRepository(session)
+    order_repo = OrderRepository(session)
 
-    def get_order(self, order_id: int) -> dict:
-        order = self._repository.get_by_id(order_id)
-        if order is None:
-            raise OrderNotFoundError(order_id)
-        return order
+    user = user_repo.get_by_id(user_id)
+    if user is None:
+        raise LookupError("Пользователь не найден")
+    if user.balance < amount:
+        raise ValueError("Недостаточно средств")
 
-    def create_order(self, payload: OrderCreate) -> dict:
-        order = {
-            "drink": payload.drink,
-            "size": payload.size,
-            "quantity": payload.quantity,
-            "customer_name": payload.customer_name,
-            "status": OrderStatus.pending,
-            "created_at": datetime.now(),
-        }
-        return self._repository.add(order)
+    try:
+        user.balance -= amount
+        order = order_repo.add(user_id=user_id, amount=amount, status="pending")
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
 
-    def update_order(self, order_id: int, payload: OrderUpdate) -> dict:
-        order = self._repository.get_by_id(order_id)
-        if order is None:
-            raise OrderNotFoundError(order_id)
-        if order["status"] == OrderStatus.completed:
-            raise OrderAlreadyCompletedError(order_id)
-
-        updates = payload.model_dump(exclude_unset=True)
-        return self._repository.update(order_id, updates)
-
-    def cancel_order(self, order_id: int) -> None:
-        order = self._repository.get_by_id(order_id)
-        if order is None:
-            raise OrderNotFoundError(order_id)
-        if order["status"] == OrderStatus.completed:
-            raise OrderAlreadyCompletedError(order_id)
-
-        self._repository.delete(order_id)
+    session.refresh(order)
+    return order
